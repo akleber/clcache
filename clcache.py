@@ -51,6 +51,9 @@ from subprocess import Popen, PIPE
 import sys
 import multiprocessing
 import re
+import time
+import msvcrt
+import random
 
 VERSION = "3.0.3-dev"
 
@@ -84,10 +87,9 @@ class LogicException(Exception):
         return repr(self.message)
 
 
-class ObjectCacheLock:
+class ObjectCacheLockMutex:
     """ Implements a lock for the object cache which
     can be used in 'with' statements. """
-    INFINITE = 0xFFFFFFFF
 
     def __init__(self, mutexName, timeoutMs):
         mutexName = 'Local\\' + mutexName
@@ -126,6 +128,80 @@ class ObjectCacheLock:
         self._acquired = False
 
 
+class ObjectCacheLockFile:
+    """ Implements a lock file lock for the object cache which
+    can be used in 'with' statements.
+    Inspired by
+    https://github.com/harlowja/fasteners
+    https://github.com/benediktschmitt/py-filelock"""
+
+    def __init__(self, lockfileName, timeoutMs):
+        self._lockfileName = lockfileName
+        self._lockfile = None
+        self._timeoutMs = timeoutMs
+
+    def __enter__(self):
+        self.acquire()
+
+    def __exit__(self, typ, value, traceback):
+        self.release()
+
+    def __del__(self):
+        self.release()
+
+    def _acquire(self):
+        try:
+            lockfile = open(self._lockfileName, 'a')
+        except OSError:
+            lockfile = None
+        else:
+            try:
+                msvcrt.locking(lockfile.fileno(), msvcrt.LK_NBLCK, 1)
+            except (IOError, OSError):
+                lockfile.close()
+            else:
+                self._lockfile = lockfile
+        return None
+
+    def _release(self):
+        if self._lockfile is not None:
+            lockfile = self._lockfile
+            self._lockfile = None
+            msvcrt.locking(lockfile.fileno(), msvcrt.LK_UNLCK, 1)
+            lockfile.close()
+
+            #The following might fail because another instance already has locked the file.
+            #This is no problem because the existence of the file does not provide the
+            #locking but win32 api base file locking mechanism.
+            try:
+                os.remove(self._lockfileName)
+            except OSError:
+                pass
+
+        return None
+
+    def is_locked(self):
+        return self._lockfile is not None
+
+    def acquire(self):
+        start_time = time.time()
+        while True:
+            if not self.is_locked():
+                self._acquire()
+
+            if self.is_locked():
+                break
+            elif self._timeoutMs >= 0 and time.time() - start_time > self._timeoutMs/1000:
+                raise ObjectCacheLockException("Timeout waiting for file lock")
+            else:
+                poll_intervall = random.uniform(0.01, 0.1)
+                time.sleep(poll_intervall)
+
+    def release(self):
+        if self.is_locked():
+            self._release()
+
+
 class ObjectCache:
     def __init__(self):
         try:
@@ -142,7 +218,13 @@ class ObjectCache:
             os.makedirs(self.objectsDir)
         lockName = self.cacheDirectory().replace(':', '-').replace('\\', '-')
         timeout_ms = int(os.environ.get('CLCACHE_OBJECT_CACHE_TIMEOUT_MS', 10 * 1000))
-        self.lock = ObjectCacheLock(lockName, timeout_ms)
+
+        cfg = Configuration(self)
+        if cfg.lockingStrategy() == "File":
+            lockfileName = os.path.join(self.cacheDirectory(), "cache.lock")
+            self.lock = ObjectCacheLockFile(lockfileName, timeout_ms)
+        else:
+            self.lock = ObjectCacheLockMutex(lockName, timeout_ms)
 
     def cacheDirectory(self):
         return self.dir
@@ -342,7 +424,8 @@ class PersistentJSONDict:
 
 
 class Configuration:
-    _defaultValues = {"MaximumCacheSize": 1073741824} # 1 GiB
+    _defaultValues = {"MaximumCacheSize": 1073741824, # 1 GiB
+                      "LockingStrategy": "Mutex"}
 
     def __init__(self, objectCache):
         self._objectCache = objectCache
@@ -357,6 +440,9 @@ class Configuration:
 
     def setMaximumCacheSize(self, size):
         self._cfg["MaximumCacheSize"] = size
+
+    def lockingStrategy(self):
+        return self._cfg["LockingStrategy"]
 
     def save(self):
         self._cfg.save()
@@ -888,6 +974,7 @@ clcache statistics:
   current cache dir         : {}
   cache size                : {:,} bytes
   maximum cache size        : {:,} bytes
+  locking strategy          : {}
   cache entries             : {}
   cache hits                : {}
   cache misses
@@ -905,6 +992,7 @@ clcache statistics:
         cache.cacheDirectory(),
         stats.currentCacheSize(),
         cfg.maximumCacheSize(),
+        cfg.lockingStrategy(),
         stats.numCacheEntries(),
         stats.numCacheHits(),
         stats.numCacheMisses(),
@@ -1165,7 +1253,11 @@ def processCompileRequest(cache, compiler, args):
 
 def processDirect(cache, outputFile, compiler, cmdLine, sourceFile):
     manifestHash = ObjectCache.getManifestHash(compiler, cmdLine, sourceFile)
-    with cache.lock:
+    postProcessing = None
+
+    try:
+        cache.lock.acquire()
+
         manifest = cache.getManifest(manifestHash)
         baseDir = os.environ.get('CLCACHE_BASEDIR')
         if baseDir and not baseDir.endswith(os.path.sep):
@@ -1196,9 +1288,18 @@ def processDirect(cache, outputFile, compiler, cmdLine, sourceFile):
                 stripIncludes = True
             postProcessing = lambda compilerResult: postprocessNoManifestMiss(cache, outputFile, manifestHash, baseDir, compiler, origCmdLine, sourceFile, compilerResult, stripIncludes)
 
+    except ObjectCacheLockException:
+        printTraceStatement("Timeout waiting for lock")
+
+    finally:
+        cache.lock.release()
+
     compilerResult = invokeRealCompiler(compiler, cmdLine, captureOutput=True)
-    compilerResult = postProcessing(compilerResult)
-    printTraceStatement("Finished. Exit code %d" % compilerResult[0])
+
+    if postProcessing is not None:
+        compilerResult = postProcessing(compilerResult)
+        printTraceStatement("Finished. Exit code %d" % compilerResult[0])
+
     return compilerResult
 
 
