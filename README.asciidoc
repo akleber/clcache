@@ -90,6 +90,18 @@ CLCACHE_OBJECT_CACHE_TIMEOUT_MS::
     used by the clcache script. You may override this variable if you are
     getting ObjectCacheLockExceptions with return code 258 (which is the
     WAIT_TIMEOUT return code).
+CLCACHE_LOCKFILE::
+    Enables lockfile based access management to the cache. If this variable is set,
+    clcache will use a lockfile to ensure that only one process can access the
+    cache and statistics at a time.
+    The default of clcache is to use a windows kernel mutex to manage concurrent
+    access to the cache which only works for processes running on the same host.
+    If the cache is shared between different hosts this lockfile based access
+    management can be used.
+    The exact requirements for lockfiles to work are not available yet, but
+    they work localy on at least Windows 7 with NTFS and for network shares with
+    SMB 2.1 (comes with Windows 7).
+
 
 How clcache works
 ~~~~~~~~~~~~~~~~~
