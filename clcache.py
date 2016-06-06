@@ -186,7 +186,7 @@ class ObjectCacheLockFile:
             elif time.time() - startTime > self._timeoutMs/1000:
                 raise ObjectCacheLockException("Timeout waiting for file lock")
             else:
-                pollDelay = random.uniform(0.01, 0.1)
+                pollDelay = random.uniform(0.1, 1.0)
                 time.sleep(pollDelay)
 
     def release(self):
