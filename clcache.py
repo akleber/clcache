@@ -229,24 +229,40 @@ class ObjectCache:
         # is a big performance hit with large caches.
         effectiveMaximumSize = maximumSize * 0.9
 
+        # try to use os.scandir or scandir.scandir
+        # fall back to os.walk if not found
+        try:
+            import scandir
+            walker = scandir.walk
+        except ImportError:
+            walker = os.walk
+
         objects = [os.path.join(root, "object")
-                   for root, folder, files in os.walk(self.objectsDir)
+                   for root, folder, files in walker(self.objectsDir)
                    if "object" in files]
 
         objectInfos = [(os.stat(fn), fn) for fn in objects]
         objectInfos.sort(key=lambda t: t[0].st_atime)
 
+        # compute real current size to fix up the stored cacheSize
+        currentSize = sum(x[0].st_size for x in objectInfos)
+
+        removedItems = 0
         for stat, fn in objectInfos:
             rmtree(os.path.split(fn)[0])
+            removedItems += 1
             currentSize -= stat.st_size
             if currentSize < effectiveMaximumSize:
                 break
 
         stats.setCacheSize(currentSize)
+        stats.setNumCacheEntries(len(objectInfos) - removedItems)
+
 
     def removeObjects(self, stats, removedObjects):
         if len(removedObjects) == 0:
             return
+
         currentSize = stats.currentCacheSize()
         for o in removedObjects:
             dirPath = self._cacheEntryDir(o)
@@ -258,8 +274,8 @@ class ObjectCache:
                 # output (for preprocess-only).
                 fileStat = os.stat(objectPath)
                 currentSize -= fileStat.st_size
+                stats.unregisterCacheEntry(fileStat.st_size)
             rmtree(dirPath)
-        stats.setCacheSize(currentSize)
 
     @staticmethod
     def getManifestHash(compilerBinary, commandLine, sourceFile):
@@ -506,9 +522,16 @@ class CacheStatistics:
     def numCacheEntries(self):
         return self._stats["CacheEntries"]
 
+    def setNumCacheEntries(self, number):
+        self._stats["CacheEntries"] = number
+
     def registerCacheEntry(self, size):
         self._stats["CacheEntries"] += 1
         self._stats["CacheSize"] += size
+
+    def unregisterCacheEntry(self, size):
+        self._stats["CacheEntries"] -= 1
+        self._stats["CacheSize"] -= size
 
     def currentCacheSize(self):
         return self._stats["CacheSize"]
@@ -998,6 +1021,19 @@ def resetStatistics(cache):
     stats.save()
     print('Statistics reset')
 
+def cleanCache(cache):
+    cfg = getConfiguration()
+    stats = CacheStatistics(cache)
+    cache.clean(stats, cfg.maximumCacheSize())
+    stats.save()
+    print('Cache cleaned')
+
+def clearCache(cache):
+    stats = CacheStatistics(cache)
+    cache.clean(stats, 0)
+    stats.save()
+    print('Cache cleared')
+
 
 # Returns pair - list of includes and new compiler output.
 # Output changes if strip is True in that case all lines with include
@@ -1146,6 +1182,8 @@ def main():
 clcache.py v{}
   --help    : show this help
   -s        : print cache statistics
+  -c        : clean cache
+  -C        : clear cache
   -z        : reset cache statistics
   -M <size> : set maximum cache size (in bytes)
 """.strip().format(VERSION))
@@ -1156,6 +1194,16 @@ clcache.py v{}
     if len(sys.argv) == 2 and sys.argv[1] == "-s":
         with cache.lock:
             printStatistics(cache)
+        return 0
+
+    if len(sys.argv) == 2 and sys.argv[1] == "-c":
+        with cache.lock:
+            cleanCache(cache)
+        return 0
+
+    if len(sys.argv) == 2 and sys.argv[1] == "-C":
+        with cache.lock:
+            clearCache(cache)
         return 0
 
     if len(sys.argv) == 2 and sys.argv[1] == "-z":
