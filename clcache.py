@@ -1286,9 +1286,7 @@ def processCompileRequest(cache, compiler, args):
 
 def processDirect(cache, outputFile, compiler, cmdLine, sourceFile):
     manifestHash = ObjectCache.getManifestHash(compiler, cmdLine, sourceFile)
-
     with cache.lock:
-
         manifest = cache.getManifest(manifestHash)
         baseDir = os.environ.get('CLCACHE_BASEDIR')
         if baseDir and not baseDir.endswith(os.path.sep):
@@ -1319,13 +1317,9 @@ def processDirect(cache, outputFile, compiler, cmdLine, sourceFile):
                 stripIncludes = True
             postProcessing = lambda compilerResult: postprocessNoManifestMiss(cache, outputFile, manifestHash, baseDir, compiler, origCmdLine, sourceFile, compilerResult, stripIncludes)
 
-
-
     compilerResult = invokeRealCompiler(compiler, cmdLine, captureOutput=True)
-
     compilerResult = postProcessing(compilerResult)
     printTraceStatement("Finished. Exit code %d" % compilerResult[0])
-
     return compilerResult
 
 
